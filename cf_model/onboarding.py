@@ -147,13 +147,23 @@ def load_or_generate_mappings(data_dir: Path, model_dir: Path) -> dict:
 
     movie_popularity = {}
     movie_variance = {}
+    movie_avg_rating = {}
     for idx in range(num_items):
         ratings = movie_ratings.get(idx, [])
         movie_popularity[idx] = len(ratings)
         if len(ratings) >= 2:
             movie_variance[idx] = float(np.var(ratings))
+            movie_avg_rating[idx] = float(np.mean(ratings))
         else:
             movie_variance[idx] = 0.0
+            movie_avg_rating[idx] = 0.0
+
+    # Get top 20 most popular movies (by number of ratings)
+    top_20_movies = sorted(
+        range(num_items), 
+        key=lambda idx: movie_popularity[idx], 
+        reverse=True
+    )[:20]
 
     mappings = {
         "movie_to_idx": movie_to_idx,
@@ -163,6 +173,8 @@ def load_or_generate_mappings(data_dir: Path, model_dir: Path) -> dict:
         "genre_to_movies": dict(genre_to_movies),
         "movie_popularity": movie_popularity,
         "movie_variance": movie_variance,
+        "movie_avg_rating": movie_avg_rating,
+        "top_20_movies": top_20_movies,
         "num_items": num_items,
     }
 
@@ -486,36 +498,27 @@ def main():
         rated_movies = {}
 
     print(f"\nHi {username}! Let's build your taste profile.")
-    print(f"Rate {MIN_RATINGS}-{MAX_RATINGS} movies (1-5 stars, or 's' to skip).\n")
+    print(f"Rate {MIN_RATINGS}-{MAX_RATINGS} movies from the top 20 most popular (1-5 stars, or 's' to skip).\n")
 
-    # Initialize selector
-    selector = AdaptiveSelector(
-        genre_to_movies=mappings["genre_to_movies"],
-        movie_genres=mappings["movie_genres"],
-        movie_popularity=mappings["movie_popularity"],
-        movie_variance=mappings["movie_variance"],
-        movie_titles=mappings["movie_titles"],
-    )
-
-    # Mark already-rated movies
-    for idx in rated_movies:
-        selector.record_rating(idx)
-
+    # Use top 20 most popular movies
+    top_20 = mappings["top_20_movies"]
+    
+    # Filter out already-rated movies
+    available_movies = [idx for idx in top_20 if idx not in rated_movies]
+    
     ratings_collected = len(rated_movies)
-    shown = 0
+    movie_position = 0
 
-    while ratings_collected < MAX_RATINGS:
-        movie_idx = selector.next_movie()
-        if movie_idx is None:
-            print("No more movies available to rate.")
-            break
+    while ratings_collected < MAX_RATINGS and movie_position < len(available_movies):
+        movie_idx = available_movies[movie_position]
+        movie_position += 1
 
-        shown += 1
         title = mappings["movie_titles"].get(movie_idx, f"Movie {movie_idx}")
         genres = mappings["movie_genres"].get(movie_idx, [])
         genre_str = "|".join(genres[:3]) if genres else "Unknown"
+        num_ratings = mappings["movie_popularity"].get(movie_idx, 0)
 
-        print(f"[{ratings_collected + 1}/{MAX_RATINGS}] {title} [{genre_str}]")
+        print(f"[{ratings_collected + 1}/{MAX_RATINGS}] {title} [{genre_str}] ({num_ratings:,} ratings)")
         rating = -1
         while rating == -1:
             rating = parse_rating(input("Your rating (1-5, s=skip): "))
@@ -523,10 +526,7 @@ def main():
         if rating is not None:
             rated_movies[movie_idx] = rating
             ratings_collected += 1
-            selector.record_rating(movie_idx)
-        else:
-            # Skip - mark as seen but don't add to ratings
-            selector.rated_indices.add(movie_idx)
+        # else: skip - just continue to next movie
 
         # Check if minimum reached
         if ratings_collected >= MIN_RATINGS:
