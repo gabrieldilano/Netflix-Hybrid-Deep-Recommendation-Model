@@ -218,7 +218,11 @@ __marimo__/
 # MovieLens dataset (large files)
 data/movies.csv
 data/ratings.csv
+data/tags.csv
 data/*.zip
 
 # Generated mappings (can be regenerated from data)
 cf_model/saved_model/mappings.pkl
+
+# VSCode development
+.vscode
