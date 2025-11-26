@@ -136,10 +136,24 @@ def load_or_generate_mappings(data_dir: Path, model_dir: Path) -> dict:
 
     movie_popularity = {}
     movie_variance = {}
+    movie_avg_rating = {}
     for idx in range(num_items):
         r = movie_ratings.get(idx, [])
         movie_popularity[idx] = len(r)
-        movie_variance[idx] = np.var(r) if len(r) >= 2 else 0.0
+        if len(r) >= 2:
+            movie_variance[idx] = float(np.var(r))
+            movie_avg_rating[idx] = float(np.mean(r))
+        else:
+            movie_variance[idx] = 0.0
+            movie_avg_rating[idx] = 0.0
+
+    # Get top 50 most popular movies (by number of ratings)
+    # Using 50 to ensure users have enough movies to choose from even if they skip many
+    top_50_movies = sorted(
+        range(num_items), 
+        key=lambda idx: movie_popularity[idx], 
+        reverse=True
+    )[:50]
 
     mappings = {
         "movie_to_idx": movie_to_idx,
@@ -149,6 +163,8 @@ def load_or_generate_mappings(data_dir: Path, model_dir: Path) -> dict:
         "genre_to_movies": dict(genre_to_movies),
         "movie_popularity": movie_popularity,
         "movie_variance": movie_variance,
+        "movie_avg_rating": movie_avg_rating,
+        "top_50_movies": top_50_movies,
         "num_items": num_items,
     }
 
@@ -314,6 +330,156 @@ def hybrid_recommend(
 
     return results
 
+
+def post_process_recommendations(
+    candidate_results: list[tuple[int, str, list[str], float]],
+    mappings: dict,
+    top_k: int = 10,
+    trust_weight: float = 0.7,
+    diversity_weight: float = 0.2,
+    novelty_weight: float = 0.1,
+) -> list[tuple[int, str, list[str], float, dict]]:
+    """
+    Netflix-style post-processing: Prioritize high-confidence matches while maintaining
+    diversity and including some novelty. No strict quotas - uses weighted scoring.
+    
+    Netflix's approach:
+    - Relevance (trust/confidence) is primary - users want accurate predictions
+    - Diversity prevents redundancy (don't show 10 action movies)
+    - Novelty adds serendipity but is secondary to relevance
+    
+    Args:
+        candidate_results: List of (idx, title, genres, score) tuples
+        mappings: Dictionary with movie_popularity, movie_variance, movie_avg_rating
+        top_k: Number of final recommendations
+        trust_weight: Weight for confidence/trust (default 0.7 - high priority)
+        diversity_weight: Weight for genre diversity (default 0.2 - moderate)
+        novelty_weight: Weight for less-known movies (default 0.1 - low priority)
+    
+    Returns:
+        List of (idx, title, genres, final_score, metadata) tuples
+        where metadata contains trust, diversity, novelty scores
+    """
+    if not candidate_results:
+        return []
+    
+    movie_popularity = mappings.get("movie_popularity", {})
+    movie_variance = mappings.get("movie_variance", {})
+    movie_avg_rating = mappings.get("movie_avg_rating", {})
+    
+    # Normalize weights
+    total_weight = trust_weight + diversity_weight + novelty_weight
+    if total_weight > 0:
+        trust_weight /= total_weight
+        diversity_weight /= total_weight
+        novelty_weight /= total_weight
+    
+    # Calculate metrics for each candidate
+    candidates_with_metrics = []
+    for idx, title, genres, base_score in candidate_results:
+        popularity = movie_popularity.get(idx, 0)
+        avg_rating = movie_avg_rating.get(idx, 0)
+        
+        # Trust/Confidence: High prediction score + data reliability
+        # More ratings = more confidence in the prediction
+        max_popularity = max(movie_popularity.values()) if movie_popularity else 1
+        # Trust combines prediction quality (base_score) with data reliability
+        trust_score = base_score * 0.8 + (popularity / max_popularity) * 0.2
+        
+        # Novelty: Less popular movies (inverse of popularity)
+        # Normalize to 0-1 range
+        novelty_score = 1.0 - min(popularity / max_popularity, 1.0) if max_popularity > 0 else 0.5
+        
+        candidates_with_metrics.append({
+            'idx': idx,
+            'title': title,
+            'genres': set(genres) if genres else set(),
+            'base_score': base_score,
+            'trust_score': trust_score,
+            'novelty_score': novelty_score,
+            'popularity': popularity,
+            'avg_rating': avg_rating,
+        })
+    
+    # Netflix-style greedy selection: balance relevance with diversity
+    selected = []
+    selected_genres = set()
+    
+    # Sort candidates by initial relevance (trust score)
+    candidates_with_metrics.sort(key=lambda x: x['trust_score'], reverse=True)
+    
+    # Greedy selection: pick items that maximize weighted score
+    # This naturally favors high-confidence items while maintaining diversity
+    while len(selected) < top_k and candidates_with_metrics:
+        best_candidate = None
+        best_combined_score = -float('inf')
+        
+        for candidate in candidates_with_metrics:
+            # Calculate diversity: how different is this from already selected?
+            genre_overlap = len(candidate['genres'] & selected_genres)
+            total_genres = len(candidate['genres']) if candidate['genres'] else 1
+            diversity_score = 1.0 - (genre_overlap / max(total_genres, 1))
+            
+            # Netflix-style combined score: heavily weighted toward trust
+            # Diversity and novelty provide boosts but don't override relevance
+            combined_score = (
+                trust_weight * candidate['trust_score'] +
+                diversity_weight * diversity_score +
+                novelty_weight * candidate['novelty_score']
+            )
+            
+            if combined_score > best_combined_score:
+                best_combined_score = combined_score
+                best_candidate = candidate
+        
+        if best_candidate:
+            selected.append(best_candidate)
+            selected_genres.update(best_candidate['genres'])
+            candidates_with_metrics.remove(best_candidate)
+    
+    # Format results with metadata
+    results = []
+    accumulated_genres = set()
+    
+    for candidate in selected:
+        # Calculate diversity relative to previously selected items
+        genre_overlap = len(candidate['genres'] & accumulated_genres)
+        total_genres = len(candidate['genres']) if candidate['genres'] else 1
+        diversity_score = 1.0 - (genre_overlap / max(total_genres, 1))
+        
+        # Final combined score for display
+        final_score = (
+            trust_weight * candidate['trust_score'] +
+            diversity_weight * diversity_score +
+            novelty_weight * candidate['novelty_score']
+        )
+        
+        # Determine category for display
+        category = 'trust' if candidate['trust_score'] >= 0.85 else \
+                   'novelty' if candidate['novelty_score'] > 0.6 else \
+                   'diversity' if diversity_score > 0.5 else 'standard'
+        
+        metadata = {
+            'trust': candidate['trust_score'],
+            'novelty': candidate['novelty_score'],
+            'diversity': diversity_score,
+            'popularity': candidate['popularity'],
+            'avg_rating': candidate['avg_rating'],
+            'category': category
+        }
+        
+        results.append((
+            candidate['idx'],
+            candidate['title'],
+            list(candidate['genres']),
+            final_score,
+            metadata
+        ))
+        
+        accumulated_genres.update(candidate['genres'])
+    
+    return results
+
 # --- Main Flow ---
 
 def save_user_profile(username, user_embedding, user_bias, rated_movies, user_dir):
@@ -339,7 +505,7 @@ def parse_rating(input_str):
 
 def main():
     print("\n" + "=" * 60)
-    print(f"    Netflix Hybrid Recommender (alpha={HYBRID_ALPHA})")
+    print("    CineMatch")
     print("=" * 60 + "\n")
 
     download_movielens(DATA_DIR)
@@ -416,7 +582,7 @@ def main():
             )
             
             print("\n" + "-" * 50)
-            print("Your Hybrid Recommendations:")
+            print("Your Recommendations:")
             print("-" * 50)
             for i, (idx, title, genres, score) in enumerate(recs, 1):
                 print(f"{i:2}. {title} [{'|'.join(genres[:3])}] (Score: {score:.3f})")
@@ -425,21 +591,30 @@ def main():
             rated_movies = {}
 
     print(f"\nHi {username}! Let's build your taste profile.")
+    print(f"Rate movies from the most popular (1-5 stars, or 's' to skip).")
+    print(f"You need at least {MIN_RATINGS} ratings to get recommendations.\n")
     
-    selector = AdaptiveSelector(
-        mappings["genre_to_movies"], mappings["movie_genres"],
-        mappings["movie_popularity"], mappings["movie_variance"],
-        mappings["movie_titles"]
-    )
-    for idx in rated_movies: selector.record_rating(idx)
-
+    # Use top 50 most popular movies (more than needed so users can skip some)
+    top_50 = mappings["top_50_movies"]
+    
+    # Filter out already-rated movies
+    available_movies = [idx for idx in top_50 if idx not in rated_movies]
+    
     ratings_collected = len(rated_movies)
-    while ratings_collected < MAX_RATINGS:
-        movie_idx = selector.next_movie()
-        if movie_idx is None: break
+    movie_position = 0
+
+    while ratings_collected < MAX_RATINGS and movie_position < len(available_movies):
+        movie_idx = available_movies[movie_position]
+        movie_position += 1
 
         title = mappings["movie_titles"].get(movie_idx, f"Movie {movie_idx}")
-        print(f"[{ratings_collected + 1}/{MAX_RATINGS}] {title}")
+        genres = mappings["movie_genres"].get(movie_idx, [])
+        genre_str = "|".join(genres[:3]) if genres else "Unknown"
+        num_ratings = mappings["movie_popularity"].get(movie_idx, 0)
+
+        # Show progress toward MIN_RATINGS (15)
+        progress_indicator = f"[{ratings_collected}/{MIN_RATINGS}]" if ratings_collected < MIN_RATINGS else f"[{ratings_collected}+]"
+        print(f"{progress_indicator} {title} [{genre_str}] ({num_ratings:,} ratings)")
         
         rating = -1
         while rating == -1:
@@ -448,15 +623,23 @@ def main():
         if rating is not None:
             rated_movies[movie_idx] = rating
             ratings_collected += 1
-            selector.record_rating(movie_idx)
-        else:
-            selector.rated_indices.add(movie_idx) # Skip
+            
+            # Show encouragement message after 15 ratings
+            if ratings_collected >= MIN_RATINGS:
+                print(f"✓ You've rated {ratings_collected} movies! Feel free to keep rating for better recommendations.")
+        # else: skip - just continue to next movie
 
-        if ratings_collected >= MIN_RATINGS:
-            if input(f"\n{ratings_collected} ratings. Finish? (y/n): ").strip().lower() == "y": break
-            print()
+        # Allow continuing after MIN_RATINGS, but don't force prompt every time
+        if ratings_collected >= MIN_RATINGS and ratings_collected < MAX_RATINGS:
+            if ratings_collected == MIN_RATINGS:
+                # Only ask once when they hit 15
+                if input(f"\n{ratings_collected} ratings collected. Continue rating? (y/n): ").strip().lower() != "y":
+                    break
+                print()
+            elif ratings_collected >= MAX_RATINGS:
+                break
 
-    print("\nFitting Hybrid Profile...", end=" ", flush=True)
+    print("\nFitting your taste profile...", end=" ", flush=True)
     
     # 1. Fit CF
     user_cf_emb, user_bias = fit_user_embedding(
@@ -469,19 +652,45 @@ def main():
     
     print("done!")
 
-    recs = hybrid_recommend(
+    # Get candidate recommendations
+    candidate_recs = hybrid_recommend(
         user_cf_emb, user_bias, user_content_profile,
         item_cf_embeddings, item_biases, content_embeddings,
         set(rated_movies.keys()),
         mappings["movie_titles"], mappings["movie_genres"],
-        alpha=HYBRID_ALPHA
+        alpha=HYBRID_ALPHA,
+        top_k=50  # Get more candidates for post-processing
+    )
+    
+    # Post-process with Netflix-style weighted scoring
+    recs = post_process_recommendations(
+        candidate_recs,
+        mappings,
+        top_k=10,
+        trust_weight=0.7,  # High priority: relevance and confidence
+        diversity_weight=0.2,  # Moderate: prevent redundancy
+        novelty_weight=0.1,  # Low priority: add serendipity
     )
 
     print("\n" + "-" * 50)
-    print("Your Hybrid Recommendations:")
+    print("Your Recommendations:")
     print("-" * 50)
-    for i, (idx, title, genres, score) in enumerate(recs, 1):
-        print(f"{i:2}. {title} [{'|'.join(genres[:3])}] (Score: {score:.3f})")
+    for i, rec in enumerate(recs, 1):
+        if len(rec) == 5:
+            idx, title, genres, score, metadata = rec
+            category = metadata.get('category', '')
+            badge = ""
+            if category == 'trust':
+                badge = " 🛡️ High Confidence"
+            elif category == 'novelty':
+                badge = " ✨ Hidden Gem"
+            elif category == 'diversity':
+                badge = " 🎨 Diverse"
+            print(f"{i:2}. {title} [{'|'.join(genres[:3])}] (Score: {score:.3f}){badge}")
+        else:
+            # Fallback for old format
+            idx, title, genres, score = rec
+            print(f"{i:2}. {title} [{'|'.join(genres[:3])}] (Score: {score:.3f})")
 
     save_user_profile(username, user_cf_emb, user_bias, rated_movies, USER_DIR)
 
