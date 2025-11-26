@@ -13,14 +13,13 @@ To run the project you must first install the requirements from the provided req
 
 pip install -r requirements.txt
 
-next run the python script:
+next run the streamlit UI:
 
 cd code  
-python3 onboarding.py
+streamlit run streamlit_app.py
 
-On first run the dataset will be downloaded if is not already in the required folder. Once finished, the first thing the program
-will ask you for is your username. A profile will be created for you based off of your username. if it is your first time running
-the program, you will be asked to rate 15-20 movies of a scale of 1-5. If you have seen the movie, type your rating (1-5) and press
-enter to move on to the next movie. If you havent seen the movie, type s then enter to skip. After rating all the movies, our system
-will provide you a list of 10 movies reccomended to you based on your tastes. If you want more or different reccomendations,
-you can rerun the program with the same user profile to avoid having to go through the onbarding process again.
+On first run the dataset will be downloaded if is not already in the required folder. Once finished, the first thing the UI will display is a welcome screen.
+Here you enter a username. A profile will be created for you based off of the username entered if this is the first time said usernmae has been entered. if it is your first time running
+the program, you will be asked to rate 15-20 movies of a scale of 1-5. If you have seen the movie, give a rating using the UI. After you have rated at least 15 movies, you can get reccomendations immidiately by
+clicking the "Get Reccomendations" Button. If you havent seen the movie, press the skip button. After rating all the movies or choosing to get reccomendations early, our system
+will provide you a list of movies reccomended to you based on your tastes. If you want more or different reccomendations, you can login to the same user profile to avoid having to go through the onbarding process again.
